@@ -1,6 +1,10 @@
 # HPKV WebSocket Implementation Showcase
 
-A technical demonstration of HPKV's WebSocket-based API through a todo application. This showcase illustrates how WebSocket can be used as an efficient communication protocol for key-value store operations.
+A technical demonstration of HPKV's WebSocket-based API through a todo application. This showcase illustrates how WebSocket can be used as an efficient communication protocol for key-value store operations and how to build a simple and responsive, multi-user application using HPKV's WebSocket API.
+
+[Live Demo](https://showcase-todo.hpkv.io/)
+
+![Screenshot](/images/screenshot-darkmode.png)
 
 ## Why WebSocket for HPKV Users
 
@@ -174,8 +178,6 @@ The todo application demonstrates this pattern:
        HPKV-->>WS: Todo objects
        WS-->>C: Todo objects
    ```
-
-This implementation showcases how to build a responsive, multi-user application using HPKV's WebSocket API, even without true server-push capabilities.
 
 ## License
 MIT 
