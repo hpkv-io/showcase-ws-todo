@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HPKV Live Todo App</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="auth-screen" class="screen">
+        <div class="auth-container">
+            <h1>HPKV Live Todo List</h1>
+            <p>Enter your API key to continue</p>
+            <select id="region-select" class="region-select">
+                <option value="api-eu-1.hpkv.io">EU1 (Europe 1)</option>
+                <option value="api-eu-2.hpkv.io">EU2 (Europe 2)</option>
+                <option value="api-us-1.hpkv.io">US1 (United States 1)</option>
+                <option value="localhost:3000">Local Development</option>
+            </select>
+            <input type="text" id="api-key" placeholder="API Key">
+            <button id="connect-btn">Connect</button>
+        </div>
+    </div>
+
+    <div id="todo-screen" class="screen hidden">
+        <div class="todo-container">
+            <div class="days-container">
+                <div class="day-section" data-day="monday">
+                    <div class="day-header">
+                        <h1>MONDAY</h1>
+                        <p class="date"></p>
+                    </div>
+                    <div class="todo-list"></div>
+                    <div class="add-todo">
+                        <div class="input-group">
+                            <input type="text" class="new-todo" placeholder="Add a new task...">
+                            <button class="add-todo-btn">Add</button>
+                        </div>
+                        <div class="priority-selector">
+                            <button class="priority-btn" data-priority="low">Low</button>
+                            <button class="priority-btn" data-priority="high">High</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="day-section" data-day="tuesday">
+                    <div class="day-header">
+                        <h1>TUESDAY</h1>
+                        <p class="date"></p>
+                    </div>
+                </div>
+                <div class="day-section" data-day="wednesday">
+                    <div class="day-header">
+                        <h1>WEDNESDAY</h1>
+                        <p class="date"></p>
+                    </div>
+                </div>
+                <div class="day-section" data-day="thursday">
+                    <div class="day-header">
+                        <h1>THURSDAY</h1>
+                        <p class="date"></p>
+                    </div>
+                </div>
+                <div class="day-section" data-day="friday">
+                    <div class="day-header">
+                        <h1>FRIDAY</h1>
+                        <p class="date"></p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html> 
