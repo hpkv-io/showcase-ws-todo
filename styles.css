@@ -544,6 +544,35 @@ body {
     .day-section {
         padding: 1.5rem;
     }
+
+    /* Fix theme toggle and logout button positioning on mobile */
+    .theme-toggle {
+        position: absolute;
+        top: 20px;
+        right: 20px;
+    }
+
+    .logout-btn {
+        position: absolute;
+        top: 20px;
+        right: 70px;
+    }
+
+    .auth-container {
+        margin-top: 80px; /* Add space for the fixed buttons */
+        width: 100%;
+        max-width: none;
+        padding: 1.5rem;
+    }
+
+    /* Ensure inputs and buttons are properly sized on mobile */
+    #api-key, 
+    .region-select,
+    #connect-btn {
+        width: 100%;
+        max-width: none;
+        margin-bottom: 1rem;
+    }
 }
 
 .delete-btn {
