@@ -139,7 +139,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (pollInterval) {
                 clearInterval(pollInterval);
             }
-            pollInterval = setInterval(fetchTodos, 2000);
+            pollInterval = setInterval(fetchTodos, 1000);
             fetchTodos(); // Initial fetch
         };
 
