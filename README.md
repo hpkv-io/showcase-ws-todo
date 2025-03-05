@@ -19,7 +19,30 @@ A technical demonstration of HPKV's WebSocket-based API through a todo applicati
    ws.send({ op: OP_INSERT, key: 'key2', value: 'data' });
    ```
 
-2. **Reduced Code Complexity**:
+2. **Real-time Key Monitoring (Pub-Sub)**:
+   ```javascript
+   // Generate a monitoring token for multiple keys
+   const token = await fetch(`https://${region}/token/websocket`, {
+     method: 'POST',
+     headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+     body: JSON.stringify({ subscribeKeys: ['todos-20240305', 'todos-20240306'] })
+   }).then(res => res.json()).then(data => data.token);
+   
+   // Connect monitoring WebSocket
+   const monitorWs = new WebSocket(`wss://${region}/ws?token=${token}`);
+   
+   // Handle notifications
+   monitorWs.onmessage = (event) => {
+     const notification = JSON.parse(event.data);
+     if (notification.type === 'notification') {
+       // Process the complete todo list update
+       const todos = JSON.parse(notification.value);
+       updateUI(todos);
+     }
+   };
+   ```
+
+3. **Reduced Code Complexity**:
    Without WebSocket, applications need to handle:
    - New HTTP connection for each operation
    - API key in headers for each request
@@ -27,7 +50,7 @@ A technical demonstration of HPKV's WebSocket-based API through a todo applicati
    - Request timeout management
    - Response status code handling
 
-3. **Built-in Connection Management**:
+4. **Built-in Connection Management**:
    ```javascript
    ws.onclose = () => {
      authScreen.classList.remove('hidden');
@@ -49,9 +72,9 @@ A technical demonstration of HPKV's WebSocket-based API through a todo applicati
 
 2. **Efficient for High-Frequency Operations**:
    ```javascript
-   // Multiple operations without connection overhead
-   sendMessage(OP_INSERT, `${activeDate}-${newCount}`, todo);
-   sendMessage(OP_INSERT, `${activeDate}-count`, newCount.toString());
+   // Single operation for the entire todo list
+   const todos = [...existingTodos, newTodo];
+   sendMessage(OP_INSERT, `todos-${activeDate}`, JSON.stringify(todos));
    ```
 
 ## Implementation Example
@@ -76,14 +99,22 @@ const OP_DELETE = 4;
 
 ### State Synchronization
 ```javascript
-// Simple polling for updates
-pollInterval = setInterval(fetchTodos, 2000);
+// Set up WebSocket monitoring for all visible days
+setupMonitoring();
 
-// Handle updates
-ws.onmessage = async (event) => {
-    const response = JSON.parse(event.data);
-    if (response.code === 200) {
-        updateLocalState(response.key, response.value);
+// Handle updates via pub-sub
+monitorWs.onmessage = (event) => {
+    const notification = JSON.parse(event.data);
+    if (notification.type === 'notification') {
+        const { key, value } = notification;
+        
+        // Update the UI if this is the active day
+        if (key === `todos-${activeDate}`) {
+            refreshTodoList(value);
+        }
+        
+        // Cache the updated value
+        todoCache.set(key, value);
     }
 };
 ```
@@ -101,6 +132,7 @@ ws.onmessage = async (event) => {
    - Lower latency operations
    - Reduced bandwidth usage
    - Efficient for frequent operations
+   - Single key per day reduces key space
 
 ## Files
 - `index.html`: Application structure
@@ -110,73 +142,80 @@ ws.onmessage = async (event) => {
 ## Implementation Notes
 
 ### WebSocket Usage
-While WebSocket is typically known for bidirectional communication, HPKV's implementation uses it as an efficient RPC protocol:
-- No server-push capability
-- All updates are client-initiated
-- State synchronization uses polling (2-second interval)
+While WebSocket is typically known for bidirectional communication, HPKV's implementation offers two patterns:
+
+1. **RPC Pattern (Command WebSocket)**:
+   - All updates are client-initiated
+   - Used for standard CRUD operations (GET, INSERT, UPDATE, DELETE)
+   - Returns response for each operation
+
+2. **Pub-Sub Pattern (Monitoring WebSocket)**:
+   - Real-time key change notifications
+   - Server pushes updates when monitored keys change
+   - Efficient for detecting changes without polling
+   - Monitors all visible days simultaneously
 
 ### Todo App Implementation
-The todo application demonstrates this pattern:
+The todo application demonstrates these patterns:
 
 1. **Data Structure**:
    ```javascript
-   // Each day's todos are stored as:
-   ${date}-count: "3"    // Number of todos
-   
-   ${date}-1: {         // Individual todos
-     text: "Buy groceries",
-     priority: "high",
-     status: "not set",
-     created: 1708291200000,
-     isDeleted: false
-   }
-   
-   ${date}-2: {
-     text: "Call dentist",
-     priority: "low",
-     status: "done",
-     created: 1708291245000,
-     isDeleted: false
-   }
+   // Each day's todos are stored as a single key with an array value:
+   todos-2024-03-05: [
+     {
+       id: "todo_1708291200000_123",
+       text: "Buy groceries",
+       priority: "high",
+       status: "not set",
+       created: 1708291200000
+     },
+     {
+       id: "todo_1708291245000_456",
+       text: "Call dentist",
+       priority: "low",
+       status: "done",
+       created: 1708291245000
+     }
+   ]
    ```
 
 2. **State Management**:
-   - Client maintains a local cache of todos
-   - Polls server every 2 seconds for updates
-   - Updates local state when changes are detected
+   - Client maintains a local cache of todos by day
+   - Uses WebSocket pub-sub to monitor all visible days in real-time
+   - When a day's todo list changes, receives the complete updated list
+   - Updates local state and UI immediately upon receiving notification
 
 3. **Operations Flow**:
    ```mermaid
    sequenceDiagram
        participant C as Client
        participant WS as WebSocket
+       participant MWS as Monitor WebSocket
        participant HPKV as HPKV
+
+       %% Setup monitoring
+       Note over C,HPKV: Setup Key Monitoring
+       C->>HPKV: POST /token/websocket (subscribe to all visible days)
+       HPKV-->>C: token
+       C->>MWS: Connect with token
+       MWS-->>C: Connection established
 
        %% Adding new todo
        Note over C,HPKV: Adding New Todo
-       C->>WS: GET ${date}-count
-       WS->>HPKV: Get count
-       HPKV-->>WS: count="2"
-       WS-->>C: count="2"
-       C->>WS: INSERT ${date}-3 (new todo)
-       WS->>HPKV: Insert todo
-       HPKV-->>WS: Success
-       WS-->>C: Success
-       C->>WS: INSERT ${date}-count="3"
-       WS->>HPKV: Update count
+       C->>WS: GET todos-2024-03-05
+       WS->>HPKV: Get todos
+       HPKV-->>WS: [existing todos]
+       WS-->>C: [existing todos]
+       C->>WS: INSERT todos-2024-03-05 ([...existing, newTodo])
+       WS->>HPKV: Insert updated array
        HPKV-->>WS: Success
        WS-->>C: Success
 
-       %% Polling for updates
-       Note over C,HPKV: Polling for Updates
-       C->>WS: GET ${date}-count
-       WS->>HPKV: Get count
-       HPKV-->>WS: count="3"
-       WS-->>C: count="3"
-       C->>WS: GET ${date}-1,2,3
-       WS->>HPKV: Get todos
-       HPKV-->>WS: Todo objects
-       WS-->>C: Todo objects
+       %% Real-time updates via monitoring
+       Note over C,HPKV: Real-time Updates
+       HPKV->>MWS: Notification: todos-2024-03-05 updated
+       MWS->>C: Notification with complete todo list
+       C-->C: Update UI with new data
    ```
 
 ## License

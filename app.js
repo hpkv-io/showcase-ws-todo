@@ -17,14 +17,21 @@ const isLocalhost = window.location.hostname === 'localhost' ||
 
 // App state
 let ws = null;
+let monitorWs = null; // WebSocket for key monitoring
 let selectedPriority = 'low';
 let messageId = 1;
 let isAddingTodo = false;
-let todoCache = new Map(); // Cache to track todo states
+let todoCache = new Map(); // Cache to track todos by day
 let lastUpdateTime = 0;
 let lastMessageIds = new Set(); // Track our own message IDs
 let activeDay = null;
-let pollInterval = null; // Track polling interval
+let monitorToken = null; // Token for key monitoring
+let visibleDays = []; // Track visible days for monitoring
+
+// Function to get a date formatted as a key
+function getDateKey(date) {
+    return `todos-${date}`;
+}
 
 // Wait for DOM to be fully loaded
 document.addEventListener('DOMContentLoaded', () => {
@@ -82,9 +89,15 @@ document.addEventListener('DOMContentLoaded', () => {
         localStorage.removeItem(API_KEY);
         localStorage.removeItem(REGION_KEY);
         
-        // Close WebSocket connection
+        // Close WebSocket connections
         if (ws) {
             ws.close();
+            ws = null;
+        }
+        
+        if (monitorWs) {
+            monitorWs.close();
+            monitorWs = null;
         }
         
         // Clear input fields
@@ -117,7 +130,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Connect to WebSocket with API key as query parameter
         ws = new WebSocket(`${protocol}://${selectedRegion}/ws?apiKey=${apiKey}`);
 
-        ws.onopen = () => {
+        ws.onopen = async () => {
             authScreen.classList.add('hidden');
             todoScreen.classList.remove('hidden');
             logoutBtn.classList.remove('hidden'); // Show logout button
@@ -135,19 +148,17 @@ document.addEventListener('DOMContentLoaded', () => {
                 }, 100);
             }
             
-            // Start polling
-            if (pollInterval) {
-                clearInterval(pollInterval);
-            }
-            pollInterval = setInterval(fetchTodos, 1000);
-            fetchTodos(); // Initial fetch
+            // Set up monitoring for today's todo count instead of polling
+            setupMonitoring();
         };
 
         ws.onclose = () => {
-            if (pollInterval) {
-                clearInterval(pollInterval);
-                pollInterval = null;
+            // Close monitoring WebSocket if exists
+            if (monitorWs) {
+                monitorWs.close();
+                monitorWs = null;
             }
+            
             authScreen.classList.remove('hidden');
             todoScreen.classList.add('hidden');
             logoutBtn.classList.add('hidden'); // Hide logout button
@@ -163,86 +174,34 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = JSON.parse(event.data);
             if (!activeDay) return;
             const activeDate = activeDay.dataset.day;
+            const dateKey = getDateKey(activeDate);
             
             // Skip processing only if this is our own recent update
             if (lastMessageIds.has(response.messageId) && Date.now() - lastUpdateTime < UPDATE_DEBOUNCE) {
+                console.log('Skipping our own update:', response.messageId);
                 return;
-            }
-
-            // For count responses, compare current state before updating
-            if (response.key === `${activeDate}-count` && !isAddingTodo) {
-                const todoList = getTodoList();
-                if (todoList) {
-                    const currentCount = parseInt(response.value || '0');
-                    const currentTodos = todoList.children.length;
-                    
-                    // Always fetch if counts don't match or if this is an update from another client
-                    if (currentCount !== currentTodos || !lastMessageIds.has(response.messageId)) {
-                        if (currentCount > 0) {
-                            console.log(`Fetching ${currentCount} todos...`);
-                            for (let i = 1; i <= currentCount; i++) {
-                                sendMessage(OP_GET, `${activeDate}-${i}`);
-                            }
-                        } else {
-                            todoList.innerHTML = '';
-                        }
-                        return;
-                    }
-                }
             }
 
             console.log('Received message:', response);
 
             if (response.code !== 200) {
                 if (response.code === 404) {
-                    if (response.key === `${activeDate}-count`) {
-                        // No todos exist yet
-                        console.log('No todos found');
+                    if (response.key === dateKey) {
+                        // No todos exist yet for this day
+                        console.log('No todos found for day:', activeDate);
                         const todoList = getTodoList();
                         if (todoList) {
                             todoList.innerHTML = '';
                         }
+                        
+                        // If we're adding a todo, create the first todo
                         if (isAddingTodo) {
-                            // This is a new day, create the first todo
-                            const todo = {
-                                text: getNewTodoInput().value.trim(),
-                                priority: selectedPriority,
-                                status: 'not set',
-                                created: Date.now(),
-                                isDeleted: false
-                            };
-                            
-                            // Add first todo and set count
-                            sendMessage(OP_INSERT, `${activeDate}-1`, todo);
-                            sendMessage(OP_INSERT, `${activeDate}-count`, '1');
-                            
-                            // Display the todo immediately
-                            const newTodo = {
-                                ...todo,
-                                id: 1
-                            };
-                            
-                            if (todoList) {
-                                todoList.appendChild(createTodoElement(newTodo, true)); // This is a new todo
-                                todoCache.set(`${activeDate}-1`, JSON.stringify(newTodo));
-                                sortTodos();
+                            const newInput = getNewTodoInput();
+                            if (newInput) {
+                                addTodo(newInput.value.trim());
                             }
-                            
-                            // Clear input and reset flag
-                            const input = getNewTodoInput();
-                            if (input) {
-                                input.value = '';
-                            }
-                            isAddingTodo = false;
-                            lastUpdateTime = Date.now();
                         }
-                        return;
                     }
-                }
-                if (response.code === 409) {
-                    // There are existing todos, let's get the count and add to it
-                    console.log('Found existing todos, fetching count...');
-                    sendMessage(OP_GET, `${activeDate}-count`);
                     return;
                 }
                 console.error('Error:', response.error);
@@ -250,107 +209,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            // Handle count request for adding new todo
-            if (response.key === `${activeDate}-count`) {
-                const currentCount = parseInt(response.value || '0');
-                console.log(`Current todo count: ${currentCount}`);
-                
-                if (isAddingTodo) {
-                    if (!activeDay) {
-                        isAddingTodo = false;
-                        return;
-                    }
+            // Handle todos response
+            if (response.key === dateKey) {
+                if (response.value) {
+                    // Save in cache
+                    todoCache.set(dateKey, response.value);
                     
-                    const newCount = currentCount + 1;
-                    const timestamp = Date.now();
-                    
-                    const todo = {
-                        text: getNewTodoInput().value.trim(),
-                        priority: selectedPriority,
-                        status: 'not set',
-                        created: timestamp,
-                        isDeleted: false
-                    };
-                    
-                    console.log('Adding new todo:', todo);
-                    
-                    // Add new todo
-                    sendMessage(OP_INSERT, `${activeDate}-${newCount}`, todo, timestamp);
-                    
-                    // Update count
-                    sendMessage(OP_INSERT, `${activeDate}-count`, newCount.toString(), timestamp);
-                    
-                    // Display the todo immediately
-                    const newTodo = {
-                        ...todo,
-                        id: newCount
-                    };
-                    
+                    // Update UI
+                    refreshTodoList(response.value);
+                } else {
+                    // Empty todos
                     const todoList = getTodoList();
                     if (todoList) {
-                        todoList.appendChild(createTodoElement(newTodo, true)); // This is a new todo
-                        todoCache.set(`${activeDate}-${newCount}`, JSON.stringify(newTodo));
-                        sortTodos();
-                    }
-                    
-                    // Clear input and reset flag
-                    const input = getNewTodoInput();
-                    if (input) {
-                        input.value = '';
-                    }
-                    isAddingTodo = false;
-                    lastUpdateTime = timestamp; // Prevent immediate refresh
-                } else {
-                    // This is a regular count check (polling or initial load)
-                    // Fetch all todos if we have any
-                    if (currentCount > 0) {
-                        console.log(`Fetching ${currentCount} todos...`);
-                        for (let i = 1; i <= currentCount; i++) {
-                            sendMessage(OP_GET, `${activeDate}-${i}`);
-                        }
+                        todoList.innerHTML = '';
                     }
                 }
                 return;
-            }
-
-            // Handle individual todo responses
-            const [date, id] = (response.key || '').split('-');
-            if (date && id && id !== 'count') {
-                if (response.value) {
-                    try {
-                        const todo = JSON.parse(response.value);
-                        todo.id = id;
-                        
-                        // Check if todo has changed
-                        const cachedTodo = todoCache.get(`${date}-${id}`);
-                        const todoStr = JSON.stringify(todo);
-                        
-                        if (!cachedTodo || cachedTodo !== todoStr) {
-                            console.log(`Todo ${id} has changed, updating...`);
-                            
-                            const todoList = getTodoList();
-                            if (todoList) {
-                                // Remove existing todo if present
-                                const existingTodo = todoList.querySelector(`[data-id="${id}"]`);
-                                if (existingTodo) {
-                                    existingTodo.remove();
-                                }
-                                
-                                // Add new/updated todo with animation if it's from another client
-                                const isFromOtherClient = !lastMessageIds.has(response.messageId);
-                                todoList.appendChild(createTodoElement(todo, false, isFromOtherClient));
-                                
-                                // Update cache
-                                todoCache.set(`${date}-${id}`, todoStr);
-                                
-                                // Sort todos
-                                sortTodos();
-                            }
-                        }
-                    } catch (error) {
-                        console.error('Error parsing todo:', error);
-                    }
-                }
             }
         };
     });
@@ -397,11 +271,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function createTodoElement(todo, isNew = true, isUpdate = false) {
-        // Don't create element if todo is deleted
-        if (todo.isDeleted) {
-            return null;
-        }
-
         const todoItem = document.createElement('div');
         todoItem.className = `todo-item ${todo.status === 'done' ? 'done' : ''}`;
         
@@ -442,30 +311,68 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function sendMessage(op, key, value = '', timestamp = Date.now()) {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            console.error('WebSocket not connected');
+            return;
+        }
         
+        const id = messageId++;
         const message = {
             op,
             key,
-            value: typeof value === 'object' ? JSON.stringify(value) : value,
-            timestamp,
-            messageId: messageId++
+            value: value && typeof value !== 'string' ? JSON.stringify(value) : value,
+            timestamp
         };
         
-        // Track our own message IDs
-        lastMessageIds.add(message.messageId);
-        // Keep only last 100 message IDs to prevent memory growth
-        if (lastMessageIds.size > 100) {
-            const oldestId = Array.from(lastMessageIds)[0];
+        // Track our own message IDs to avoid duplicate processing
+        lastMessageIds.add(id);
+        message.messageId = id;
+        
+        // Cleanup old message IDs (keep only the last 50)
+        if (lastMessageIds.size > 50) {
+            const oldestId = [...lastMessageIds][0];
             lastMessageIds.delete(oldestId);
         }
         
         ws.send(JSON.stringify(message));
     }
 
+    // Generate a WebSocket token for key monitoring
+    async function generateMonitorToken(subscribeDays) {
+        try {
+            // Convert dates to proper key format
+            const subscribeKeys = subscribeDays.map(date => getDateKey(date));
+            
+            const selectedRegion = localStorage.getItem(REGION_KEY);
+            const apiKey = localStorage.getItem(API_KEY);
+            const protocol = selectedRegion === 'localhost:3000' ? 'http' : 'https';
+            
+            console.log('Generating monitoring token for keys:', subscribeKeys);
+            
+            const response = await fetch(`${protocol}://${selectedRegion}/token/websocket`, {
+                method: 'POST',
+                headers: {
+                    'x-api-key': apiKey,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ subscribeKeys })
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Failed to generate token: ${response.status}`);
+            }
+            
+            const data = await response.json();
+            return data.token;
+        } catch (error) {
+            console.error('Error generating monitor token:', error);
+            return null;
+        }
+    }
+
     async function fetchTodos() {
         const now = Date.now();
-        // Skip polling only if we just made an update ourselves
+        // Skip fetching if we just made an update ourselves
         if (now - lastUpdateTime < UPDATE_DEBOUNCE && lastMessageIds.size > 0) {
             return;
         }
@@ -473,8 +380,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!activeDay) return;
         
         const activeDate = activeDay.dataset.day;
-        console.log('Fetching todos count for:', activeDate);
-        sendMessage(OP_GET, `${activeDate}-count`);
+        const dateKey = getDateKey(activeDate);
+        
+        console.log('Fetching todos for:', activeDate);
+        sendMessage(OP_GET, dateKey);
     }
 
     function getTodoList() {
@@ -490,65 +399,106 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const activeDate = activeDay.dataset.day;
         const timestamp = Date.now();
+        const dateKey = getDateKey(activeDate);
         
         isAddingTodo = true;
         
+        // Get existing todos or create empty array
+        const existingTodosStr = todoCache.get(dateKey);
+        let todos = [];
+        
+        if (existingTodosStr) {
+            try {
+                todos = JSON.parse(existingTodosStr);
+                if (!Array.isArray(todos)) {
+                    todos = [];
+                }
+            } catch (e) {
+                console.error('Error parsing todos:', e);
+            }
+        }
+        
+        // Generate a unique ID for the new todo
+        const id = `todo_${timestamp}_${Math.floor(Math.random() * 1000)}`;
+        
         // Create new todo
-        const todo = {
+        const newTodo = {
+            id,
             text: text.trim(),
             priority: selectedPriority,
             status: 'not set',
-            created: timestamp,
-            isDeleted: false
+            created: timestamp
         };
-
-        // For new days, directly create the first todo
+        
+        // Add to array
+        todos.push(newTodo);
+        
+        // Save updated todos
+        const todosJson = JSON.stringify(todos);
+        sendMessage(OP_INSERT, dateKey, todosJson, timestamp);
+        
+        // Update cache immediately
+        todoCache.set(dateKey, todosJson);
+        
+        // Update UI immediately without waiting for server response
         const todoList = getTodoList();
-        if (todoList && todoList.children.length === 0) {
-            // Add first todo and set count
-            sendMessage(OP_INSERT, `${activeDate}-1`, todo);
-            sendMessage(OP_INSERT, `${activeDate}-count`, '1');
-            
-            // Display the todo immediately
-            const newTodo = {
-                ...todo,
-                id: 1
-            };
-            
-            todoList.appendChild(createTodoElement(newTodo));
-            todoCache.set(`${activeDate}-1`, JSON.stringify(newTodo));
+        if (todoList) {
+            todoList.appendChild(createTodoElement(newTodo, true));
             sortTodos();
-            
-            // Clear input
-            const input = getNewTodoInput();
-            if (input) {
-                input.value = '';
-            }
-            isAddingTodo = false;
-            lastUpdateTime = timestamp;
-            return;
         }
-
-        // Get current count for existing days
-        sendMessage(OP_GET, `${activeDate}-count`);
+        
+        // Reset state
+        isAddingTodo = false;
+        lastUpdateTime = timestamp;
+        
+        // Clear input
+        const input = getNewTodoInput();
+        if (input) {
+            input.value = '';
+        }
     }
 
     function toggleTodo(id, isDone) {
         if (!activeDay) return;
         const activeDate = activeDay.dataset.day;
+        const dateKey = getDateKey(activeDate);
         const timestamp = Date.now();
         
-        // Get the current todo from cache if available
-        const cachedTodoStr = todoCache.get(`${activeDate}-${id}`);
-        if (cachedTodoStr) {
-            const todo = JSON.parse(cachedTodoStr);
+        // Get the current todos from cache
+        const cachedTodosStr = todoCache.get(dateKey);
+        if (!cachedTodosStr) {
+            console.error('No todos in cache for day:', activeDate);
+            return;
+        }
+        
+        try {
+            // Parse todos
+            const todos = JSON.parse(cachedTodosStr);
+            if (!Array.isArray(todos)) {
+                console.error('Invalid todos format in cache');
+                return;
+            }
+            
+            // Find the todo to update
+            const todoIndex = todos.findIndex(todo => todo.id === id);
+            if (todoIndex === -1) {
+                console.error('Todo not found:', id);
+                return;
+            }
+            
+            // Update the todo status
+            const todo = todos[todoIndex];
             const currentStatus = todo.status;
             todo.status = currentStatus === 'done' ? 'not set' : 'done';
             
-            // Update the todo
-            sendMessage(OP_INSERT, `${activeDate}-${id}`, todo, timestamp);
+            // Update the todos array
+            todos[todoIndex] = todo;
             
-            // Update UI immediately - look within active day's todo list
+            // Save updated todos
+            const todosJson = JSON.stringify(todos);
+            sendMessage(OP_INSERT, dateKey, todosJson, timestamp);
+            
+            // Update UI immediately
             const todoList = getTodoList();
             if (todoList) {
                 const todoElement = todoList.querySelector(`[data-id="${id}"]`);
@@ -561,48 +511,54 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
             
-            // Update cache immediately to prevent flicker
-            todoCache.set(`${activeDate}-${id}`, JSON.stringify(todo));
+            // Update cache immediately
+            todoCache.set(dateKey, todosJson);
             lastUpdateTime = timestamp;
             
             // Sort todos after status change
             sortTodos();
-        } else {
-            // Fallback to fetching if not in cache
-            sendMessage(OP_GET, `${activeDate}-${id}`);
-            
-            ws.addEventListener('message', function handler(event) {
-                const response = JSON.parse(event.data);
-                
-                if (response.key === `${activeDate}-${id}` && response.value) {
-                    // Remove this one-time handler
-                    ws.removeEventListener('message', handler);
-                    
-                    const todo = JSON.parse(response.value);
-                    const currentStatus = todo.status;
-                    todo.status = currentStatus === 'done' ? 'not set' : 'done';
-                    
-                    // Update the todo
-                    sendMessage(OP_INSERT, `${activeDate}-${id}`, todo, timestamp);
-                    lastUpdateTime = timestamp;
-                }
-            });
+        } catch (error) {
+            console.error('Error updating todo:', error);
         }
     }
 
     function deleteTodo(id) {
         if (!activeDay) return;
         const activeDate = activeDay.dataset.day;
+        const dateKey = getDateKey(activeDate);
         const timestamp = Date.now();
         
-        // Get the current todo from cache if available
-        const cachedTodoStr = todoCache.get(`${activeDate}-${id}`);
-        if (cachedTodoStr) {
-            const todo = JSON.parse(cachedTodoStr);
-            todo.isDeleted = true;
+        // Get the current todos from cache
+        const cachedTodosStr = todoCache.get(dateKey);
+        if (!cachedTodosStr) {
+            console.error('No todos in cache for day:', activeDate);
+            return;
+        }
+        
+        try {
+            // Parse todos
+            const todos = JSON.parse(cachedTodosStr);
+            if (!Array.isArray(todos)) {
+                console.error('Invalid todos format in cache');
+                return;
+            }
             
-            // Update the todo
-            sendMessage(OP_INSERT, `${activeDate}-${id}`, todo, timestamp);
+            // Find the todo to delete
+            const todoIndex = todos.findIndex(todo => todo.id === id);
+            if (todoIndex === -1) {
+                console.error('Todo not found:', id);
+                return;
+            }
+            
+            // Option 1: Mark as deleted but keep in array
+            // todos[todoIndex].isDeleted = true;
+            
+            // Option 2: Remove from array completely
+            todos.splice(todoIndex, 1);
+            
+            // Save updated todos
+            const todosJson = JSON.stringify(todos);
+            sendMessage(OP_INSERT, dateKey, todosJson, timestamp);
             
             // Update UI immediately
             const todoList = getTodoList();
@@ -614,27 +570,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             // Update cache immediately
-            todoCache.set(`${activeDate}-${id}`, JSON.stringify(todo));
+            todoCache.set(dateKey, todosJson);
             lastUpdateTime = timestamp;
-        } else {
-            // Fallback to fetching if not in cache
-            sendMessage(OP_GET, `${activeDate}-${id}`);
-            
-            ws.addEventListener('message', function handler(event) {
-                const response = JSON.parse(event.data);
-                
-                if (response.key === `${activeDate}-${id}` && response.value) {
-                    // Remove this one-time handler
-                    ws.removeEventListener('message', handler);
-                    
-                    const todo = JSON.parse(response.value);
-                    todo.isDeleted = true;
-                    
-                    // Update the todo
-                    sendMessage(OP_INSERT, `${activeDate}-${id}`, todo, timestamp);
-                    lastUpdateTime = timestamp;
-                }
-            });
+        } catch (error) {
+            console.error('Error deleting todo:', error);
         }
     }
 
@@ -723,6 +662,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     section.classList.remove('active');
                     if (activeDay === section) {
                         activeDay = null;
+                        
+                        // Close monitoring WebSocket when no day is active
+                        if (monitorWs) {
+                            monitorWs.close();
+                            monitorWs = null;
+                        }
                     }
                 } else {
                     // If there's an active day, remove its active class first
@@ -743,6 +688,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             }
                         }
                         
+                        // Fetch todos immediately for the active day
                         fetchTodos();
                     }, 50);
                 }
@@ -755,7 +701,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         // Update daySections reference
-        return document.querySelectorAll('.day-section');
+        const daySections = document.querySelectorAll('.day-section');
+        
+        // Set up monitoring for all visible days
+        setupMonitoring();
+        
+        return daySections;
     }
 
     function initializeDaySection(section) {
@@ -807,5 +758,116 @@ document.addEventListener('DOMContentLoaded', () => {
                 fetchTodos();
             }
         });
+    }
+
+    // Setup WebSocket monitoring for all visible days
+    async function setupMonitoring() {
+        // Close existing monitoring WebSocket if exists
+        if (monitorWs) {
+            monitorWs.close();
+            monitorWs = null;
+        }
+        
+        // Get all day sections and collect their dates
+        const dayElements = document.querySelectorAll('.day-section');
+        visibleDays = Array.from(dayElements).map(day => day.dataset.day);
+        
+        if (visibleDays.length === 0) {
+            console.log('No visible days to monitor');
+            return;
+        }
+        
+        console.log('Setting up monitoring for days:', visibleDays);
+        
+        // Generate a monitoring token for all days
+        const token = await generateMonitorToken(visibleDays);
+        if (!token) {
+            console.error('Failed to generate monitoring token');
+            return;
+        }
+        
+        monitorToken = token;
+        const selectedRegion = localStorage.getItem(REGION_KEY);
+        const protocol = selectedRegion === 'localhost:3000' ? 'ws' : 'wss';
+        
+        // Connect to the monitoring WebSocket
+        monitorWs = new WebSocket(`${protocol}://${selectedRegion}/ws?token=${token}`);
+        
+        monitorWs.onopen = () => {
+            console.log('Connected to HPKV monitoring service for days:', visibleDays);
+            
+            // Do initial fetch for the active day
+            if (activeDay) {
+                fetchTodos();
+            }
+        };
+        
+        monitorWs.onmessage = (event) => {
+            try {
+                const notification = JSON.parse(event.data);
+                console.log('Received notification:', notification);
+                
+                if (notification.type === 'notification') {
+                    const { key, value } = notification;
+                    
+                    // Extract date from key (todos-YYYY-MM-DD)
+                    const dateMatch = key.match(/^todos-(.+)$/);
+                    if (!dateMatch) return;
+                    
+                    const date = dateMatch[1];
+                    console.log(`Received update for day: ${date}`);
+                    
+                    // Store updated todos in cache
+                    todoCache.set(key, value);
+                    
+                    // If this is the active day, update the UI
+                    if (activeDay && activeDay.dataset.day === date) {
+                        refreshTodoList(value);
+                    }
+                }
+            } catch (error) {
+                console.error('Error processing notification:', error);
+            }
+        };
+        
+        monitorWs.onerror = (error) => {
+            console.error('Monitoring WebSocket error:', error);
+        };
+        
+        monitorWs.onclose = () => {
+            console.log('Monitoring WebSocket closed');
+            monitorWs = null;
+        };
+    }
+
+    // Function to refresh the todo list with updated data
+    function refreshTodoList(todosJson) {
+        if (!activeDay) return;
+        
+        try {
+            const todoList = getTodoList();
+            if (!todoList) return;
+            
+            // Clear the current list
+            todoList.innerHTML = '';
+            
+            // Parse todos if it's a string
+            const todos = typeof todosJson === 'string' ? JSON.parse(todosJson) : todosJson;
+            
+            // If no todos or empty array, nothing to render
+            if (!todos || !Array.isArray(todos) || todos.length === 0) {
+                return;
+            }
+            
+            // Add each todo to the list
+            todos.forEach(todo => {
+                todoList.appendChild(createTodoElement(todo, false));
+            });
+            
+            // Sort todos
+            sortTodos();
+        } catch (error) {
+            console.error('Error refreshing todo list:', error);
+        }
     }
 });
